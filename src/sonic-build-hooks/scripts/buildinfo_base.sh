@@ -9,10 +9,12 @@ DIFF_VERSION_PATH=$BUILDINFO_PATH/diff-versions
 BUILD_VERSION_PATH=$BUILDINFO_PATH/build-versions
 POST_VERSION_PATH=$BUILDINFO_PATH/post-versions
 VERSION_DEB_PREFERENCE=$BUILDINFO_PATH/versions/01-versions-deb
+VERSION_RPM_PREFERENCE=$BUILDINFO_PATH/versions/01-versionlock.list
 WEB_VERSION_FILE=$VERSION_PATH/versions-web
 BUILD_WEB_VERSION_FILE=$BUILD_VERSION_PATH/versions-web
 REPR_MIRROR_URL_PATTERN='http:\/\/packages.trafficmanager.net\/'
 DPKG_INSTALLTION_LOCK_FILE=/tmp/.dpkg_installation.lock
+RPM_INSTALLATION_LOCK_FILE=/tmp/.rpm_installation.lock
 GET_RETRY_COUNT=5
 
 . $BUILDINFO_PATH/config/buildinfo.config
@@ -51,9 +53,9 @@ log_info()
 # Get the real command not hooked by sonic-build-hook package
 get_command()
 {
-    # Change the PATH env to get the real command by excluding the command in the hooked folders
-    local path=$(echo $PATH | sed 's#[^:]*buildinfo/scripts:##' | sed "s#/usr/local/sbin:##")
-    local command=$(PATH=$path which $1)
+    # Remove all /usr/local/sbin from PATH to skip our hooks
+    local path=$(echo $PATH | tr ':' '\n' | grep -v '/usr/local/sbin' | tr '\n' ':' | sed 's/:$//')
+    local command=$(PATH=$path which $1 2>/dev/null)
     echo $command
 }
 
@@ -109,50 +111,77 @@ get_version_cache_option()
 
 
 # Enable or disable the reproducible mirrors
+# Supports both Debian apt and openEuler/rpm based systems
 set_reproducible_mirrors()
 {
-    # Remove the charater # in front of the line if matched
-    local expression="s/^#\s*\(.*$REPR_MIRROR_URL_PATTERN\)/\1/"
-    # Add the character # in front of the line, if not match the URL pattern condition
-    local expression2="/^#*deb.*$REPR_MIRROR_URL_PATTERN/! s/^#*deb/#&/"
-    local expression3="\$a#SET_REPR_MIRRORS"
-    if [ "$1" = "-d" ]; then
-        # Add the charater # in front of the line if match
-        expression="s/^deb.*$REPR_MIRROR_URL_PATTERN/#\0/"
-        # Remove the character # in front of the line, if not match the URL pattern condition
-        expression2="/^#*deb.*$REPR_MIRROR_URL_PATTERN/! s/^#\s*(#*deb)/\1/"
-        expression3="/#SET_REPR_MIRRORS/d"
-    fi
-    if [[ "$1" != "-d" ]] && [ -f /etc/apt/sources.list.d/debian.sources ]; then
-        mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.back
-    fi
-    if [[ "$1" == "-d" ]] && [ -f /etc/apt/sources.list.d/debian.sources.back ]; then
-        mv /etc/apt/sources.list.d/debian.sources.back /etc/apt/sources.list.d/debian.sources
-    fi
-
-    local mirrors="/etc/apt/sources.list $(find /etc/apt/sources.list.d/ -type f)"
-    for mirror in $mirrors; do
-        if ! grep -iq "$REPR_MIRROR_URL_PATTERN" "$mirror"; then
-            continue
+    # Debian/apt based systems
+    if [ -d /etc/apt ]; then
+        # Remove the charater # in front of the line if matched
+        local expression="s/^#\s*\(.*$REPR_MIRROR_URL_PATTERN\)/\1/"
+        # Add the character # in front of the line, if not match the URL pattern condition
+        local expression2="/^#*deb.*$REPR_MIRROR_URL_PATTERN/! s/^#*deb/#&/"
+        local expression3="\$a#SET_REPR_MIRRORS"
+        if [ "$1" = "-d" ]; then
+            # Add the charater # in front of the line if match
+            expression="s/^deb.*$REPR_MIRROR_URL_PATTERN/#\0/"
+            # Remove the character # in front of the line, if not match the URL pattern condition
+            expression2="/^#*deb.*$REPR_MIRROR_URL_PATTERN/! s/^#\s*(#*deb)/\1/"
+            expression3="/#SET_REPR_MIRRORS/d"
+        fi
+        if [[ "$1" != "-d" ]] && [ -f /etc/apt/sources.list.d/debian.sources ]; then
+            mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.back
+        fi
+        if [[ "$1" == "-d" ]] && [ -f /etc/apt/sources.list.d/debian.sources.back ]; then
+            mv /etc/apt/sources.list.d/debian.sources.back /etc/apt/sources.list.d/debian.sources
         fi
 
-        # Make sure no duplicate operations on the mirror config file
-        if ([ "$1" == "-d" ] && ! grep -iq "#SET_REPR_MIRRORS" "$mirror") ||
-           ([ "$1" != "-d" ] && grep -iq "#SET_REPR_MIRRORS" "$mirror"); then
-            continue
+        local mirrors="/etc/apt/sources.list $(find /etc/apt/sources.list.d/ -type f)"
+        for mirror in $mirrors; do
+            if ! grep -iq "$REPR_MIRROR_URL_PATTERN" "$mirror"; then
+                continue
+            fi
+
+            # Make sure no duplicate operations on the mirror config file
+            if ([ "$1" == "-d" ] && ! grep -iq "#SET_REPR_MIRRORS" "$mirror") ||
+               ([ "$1" != "-d" ] && grep -iq "#SET_REPR_MIRRORS" "$mirror"); then
+                continue
+            fi
+
+            # Enable or disable the reproducible mirrors
+            $SUDO sed -i "$expression" "$mirror"
+
+            # Enable or disable the none reproducible mirrors
+            if [ "$MIRROR_SNAPSHOT" == y ]; then
+                $SUDO sed -ri "$expression2" "$mirror"
+            fi
+
+            # Add or remove the SET_REPR_MIRRORS flag
+            $SUDO sed -i "$expression3" "$mirror"
+        done
+    fi
+
+    # openEuler/RPM based systems
+    if [ -d /etc/yum.repos.d ]; then
+        if [ "$1" == "-d" ]; then
+            # Disable reproducible mirrors: restore original repo files
+            for backup in /etc/yum.repos.d/*.repo.repr_backup; do
+                if [ -f "$backup" ]; then
+                    orig="${backup%.repr_backup}"
+                    cp -f "$backup" "$orig"
+                    rm -f "$backup"
+                fi
+            done
+        else
+            # Enable reproducible mirrors: backup and modify repo files
+            for repo_file in /etc/yum.repos.d/*.repo; do
+                [ -f "$repo_file" ] || continue
+                # Skip if already modified
+                grep -q '#SET_REPR_MIRRORS' "$repo_file" && continue
+                cp -f "$repo_file" "${repo_file}.repr_backup"
+                echo "#SET_REPR_MIRRORS" >> "$repo_file"
+            done
         fi
-
-        # Enable or disable the reproducible mirrors
-        $SUDO sed -i "$expression" "$mirror"
-
-        # Enable or disable the none reproducible mirrors
-        if [ "$MIRROR_SNAPSHOT" == y ]; then
-            $SUDO sed -ri "$expression2" "$mirror"
-        fi
-
-        # Add or remove the SET_REPR_MIRRORS flag
-        $SUDO sed -i "$expression3" "$mirror"
-    done
+    fi
 }
 
 download_packages()
@@ -449,6 +478,106 @@ check_apt_version()
     fi
 }
 
+# Check if the command is to install RPM packages via dnf/yum
+check_dnf_install()
+{
+    for para in "$@"; do
+        if [[ "$para" == -* ]]; then
+            continue
+        fi
+        if [[ "$para" == "install" ]]; then
+            echo y
+        fi
+        break
+    done
+}
+
+# Check if rpm command needs lock (install/remove/etc)
+check_rpm_need_lock()
+{
+    for para in "$@"; do
+        case "$para" in
+            -i|--install|-U|--upgrade|-e|--erase|--nodeps|-ev|--erase)
+                echo y
+                break
+                ;;
+            --force)
+                echo y
+                break
+                ;;
+        esac
+    done
+}
+
+# Print warning if RPM package version not specified when RPM version control enabled
+check_dnf_version()
+{
+    VERSION_FILE="${VERSION_PATH}/versions-rpm"
+    local install=$(check_dnf_install "$@")
+    if [ "$ENABLE_VERSION_CONTROL_RPM" == "y" ] && [ "$install" == "y" ]; then
+        for para in "$@"; do
+            if [[ "$para" == -* ]]; then
+                continue
+            fi
+            if [ "$para" == "install" ]; then
+                continue
+            fi
+            if [[ "$para" == *=* ]]; then
+                continue
+            else
+                package=$para
+                if ! grep -q "^${package}=" $VERSION_FILE 2>/dev/null; then
+                    echo "Warning: the version of the package ${package} is not specified." 1>&2
+                fi
+            fi
+        done
+    fi
+}
+
+acquire_rpm_installation_lock()
+{
+    local result=n
+    local wait_in_second=10
+    local count=60
+    local info="$1"
+    for ((i=1; i<=$count; i++)); do
+        if [ -f $RPM_INSTALLATION_LOCK_FILE ]; then
+            local lock_info=$(cat $RPM_INSTALLATION_LOCK_FILE || true)
+            echo "Waiting rpm lock for $wait_in_second, $i/$count, info: $lock_info" 1>&2
+            sleep $wait_in_second
+        else
+            # Create file in an atomic operation
+            if (set -o noclobber; echo "$info">$RPM_INSTALLATION_LOCK_FILE) &>/dev/null; then
+                result=y
+                break
+            else
+                echo "Failed to create lock, Waiting rpm lock for $wait_in_second, $i/$count, info: $lock_info" 1>&2
+                sleep $wait_in_second
+            fi
+        fi
+    done
+
+    echo $result
+}
+
+release_rpm_installation_lock()
+{
+    rm -f $RPM_INSTALLATION_LOCK_FILE
+}
+
+# Update RPM versionlock file (equivalent to Debian apt preferences)
+update_preference_rpm()
+{
+    local version_file="$VERSION_PATH/versions-rpm"
+    if [ -f "$version_file" ]; then
+        rm -f $VERSION_RPM_PREFERENCE
+        while IFS='=' read -r package version; do
+            [ -z "$package" ] && continue
+            echo "${package}-${version}" >> $VERSION_RPM_PREFERENCE
+        done < "$version_file"
+    fi
+}
+
 acquire_apt_installation_lock()
 {
     local result=n
@@ -523,11 +652,15 @@ update_version_file()
     if [[ "${version_name}" == *-deb ]]; then
         update_preference_deb
     fi
+
+    if [[ "${version_name}" == *-rpm ]]; then
+        update_preference_rpm
+    fi
 }
 
 update_version_files()
 {
-    local version_names="versions-deb versions-py2 versions-py3"
+    local version_names="versions-deb versions-rpm versions-py2 versions-py3"
     if [ "$MIRROR_SNAPSHOT" == y ]; then
         version_names="versions-py2 versions-py3"
     fi
@@ -537,6 +670,7 @@ update_version_files()
 }
 
 ENABLE_VERSION_CONTROL_DEB=$(check_version_control "deb")
+ENABLE_VERSION_CONTROL_RPM=$(check_version_control "rpm")
 ENABLE_VERSION_CONTROL_PY2=$(check_version_control "py2")
 ENABLE_VERSION_CONTROL_PY3=$(check_version_control "py3")
 ENABLE_VERSION_CONTROL_WEB=$(check_version_control "web")

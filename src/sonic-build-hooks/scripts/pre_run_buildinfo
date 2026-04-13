@@ -17,32 +17,63 @@ update_version_files
 symlink_build_hooks
 set_reproducible_mirrors
 
-mkdir -p /var/cache/apt/archives/
-mkdir -p ${PKG_CACHE_PATH}/deb/
+# Debian/apt cache setup
+if command -v dpkg &>/dev/null; then
+    mkdir -p /var/cache/apt/archives/
+    mkdir -p ${PKG_CACHE_PATH}/deb/
 
-if [ ! -z "$(get_version_cache_option)" ]; then
-	# Skip the deletion of cache files
-	cat <<-EOF >/etc/apt/apt.conf.d/docker-clean
-	DPkg::Post-Invoke { "test -f /usr/bin/rsync && rsync -avzh --ignore-errors /var/cache/apt/archives/ ${PKG_CACHE_PATH}/deb/; rm -f /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };
-	APT::Update::Post-Invoke { "test -f /usr/bin/rsync && rsync -avzh --ignore-errors /var/cache/apt/archives/ ${PKG_CACHE_PATH}/deb/; rm -f /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };
-	APT::Keep-Downloaded-Packages "true";
-	EOF
+    if [ ! -z "$(get_version_cache_option)" ]; then
+        # Skip the deletion of cache files
+        cat <<-EOF >/etc/apt/apt.conf.d/docker-clean
+DPkg::Post-Invoke { "test -f /usr/bin/rsync && rsync -avzh --ignore-errors /var/cache/apt/archives/ ${PKG_CACHE_PATH}/deb/; rm -f /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };
+APT::Update::Post-Invoke { "test -f /usr/bin/rsync && rsync -avzh --ignore-errors /var/cache/apt/archives/ ${PKG_CACHE_PATH}/deb/; rm -f /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };
+APT::Keep-Downloaded-Packages "true";
+EOF
+    fi
+
+    # Extract the cache inside the docker build.
+    if [ -f ${PKG_CACHE_FILE_NAME} ]; then
+        tar -C ${PKG_CACHE_PATH} -xvf  ${PKG_CACHE_FILE_NAME}
+        test -e ${PKG_CACHE_PATH}/deb && cp ${PKG_CACHE_PATH}/deb/* /var/cache/apt/archives/
+    fi
 fi
 
-# Extract the cache inside the docker build.
-if [ -f ${PKG_CACHE_FILE_NAME} ]; then
-	tar -C ${PKG_CACHE_PATH} -xvf  ${PKG_CACHE_FILE_NAME}
-	test -e ${PKG_CACHE_PATH}/deb && cp ${PKG_CACHE_PATH}/deb/* /var/cache/apt/archives/
+# RPM/dnf cache setup
+if command -v rpm &>/dev/null; then
+    mkdir -p /var/cache/dnf/
+    mkdir -p ${PKG_CACHE_PATH}/rpm/
+
+    if [ ! -z "$(get_version_cache_option)" ]; then
+        # Keep downloaded packages for cache
+        echo "keepcache=True" >> /etc/dnf/dnf.conf 2>/dev/null || true
+    fi
+
+    # Extract the cache inside the docker build.
+    if [ -f ${PKG_CACHE_FILE_NAME} ]; then
+        tar -C ${PKG_CACHE_PATH} -xvf ${PKG_CACHE_FILE_NAME}
+        [ -e ${PKG_CACHE_PATH}/rpm ] && cp ${PKG_CACHE_PATH}/rpm/* /var/cache/dnf/ 2>/dev/null || true
+    fi
 fi
 
 chmod -R a+rw $BUILDINFO_PATH
 
+# Apply version preferences (Debian)
 if [ "$ENABLE_VERSION_CONTROL_DEB" == "y" ] && [ -f $VERSION_DEB_PREFERENCE ]; then
     cp -f $VERSION_DEB_PREFERENCE /etc/apt/preferences.d/
 fi
 
+# Apply versionlock (RPM)
+if [ "$ENABLE_VERSION_CONTROL_RPM" == "y" ] && [ -f $VERSION_RPM_PREFERENCE ]; then
+    mkdir -p /etc/dnf/versionlock.d/
+    cp -f $VERSION_RPM_PREFERENCE /etc/dnf/versionlock.d/sonic-build-hooks.versionlock 2>/dev/null || true
+fi
+
 if [ ! -z "$(get_version_cache_option)" ]; then
-    DISTRO=${DISTRO} apt-get update && apt-get install -y rsync
+    if command -v apt-get &>/dev/null; then
+        DISTRO=${DISTRO} apt-get update && apt-get install -y rsync
+    elif command -v dnf &>/dev/null; then
+        dnf install -y rsync 2>/dev/null || yum install -y rsync 2>/dev/null || true
+    fi
 fi
 
 exit 0

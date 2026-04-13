@@ -1,0 +1,91 @@
+# Makefile for RPM-based sonic-build-hooks
+# Use this for openEuler and other RPM-based systems
+
+SONIC_BUILD_HOOKS = sonic-build-hooks
+SONIC_BUILD_HOOKS_VERSION = 1.0
+RPM_ARCH = noarch
+RPM_NAME = $(SONIC_BUILD_HOOKS)-$(SONIC_BUILD_HOOKS_VERSION)-1.$(RPM_ARCH).rpm
+
+BUILDINFO_DIR = buildinfo
+RPMBUILD_TOPDIR = rpmbuild
+SPEC_DIR = $(RPMBUILD_TOPDIR)/SPECS
+SOURCES_DIR = $(RPMBUILD_TOPDIR)/SOURCES
+
+# Debian package (original)
+DEB_PACKAGE = $(SONIC_BUILD_HOOKS)_$(SONIC_BUILD_HOOKS_VERSION)_all.deb
+TMP_DIR = tmp
+SYMBOL_LINKS_SRC_DIR = ../../usr/local/share/buildinfo/scripts
+SYMBOL_LINKS = symlink_build_hooks post_run_buildinfo pre_run_buildinfo collect_version_files post_run_cleanup
+BUILD_ROOT_DIR = $(TMP_DIR)/$(SONIC_BUILD_HOOKS)
+DEBIAN_DIR = $(BUILD_ROOT_DIR)/DEBIAN
+TRUSTED_GPG_PATH = $(BUILD_ROOT_DIR)/etc/apt/trusted.gpg.d
+INSTALL_PATH = $(BUILD_ROOT_DIR)/usr/local/share/buildinfo
+SYMBOL_LINK_PATH = $(BUILD_ROOT_DIR)/usr/sbin
+SCRIPTS_PATH = $(INSTALL_PATH)/scripts
+HOOKS_PATH = $(INSTALL_PATH)/hooks
+DPKGTOOL = $(shell which dpkg-deb 2>/dev/null)
+
+# Detect if we're on a Debian or RPM based system
+ifneq ($(DPKGTOOL),)
+BUILD_SYSTEM = debian
+else ifneq ($(shell which rpmbuild 2>/dev/null),)
+BUILD_SYSTEM = rpm
+else
+BUILD_SYSTEM = docker
+endif
+
+.PHONY: all clean rpm deb
+
+all:
+ifeq ($(BUILD_SYSTEM),rpm)
+	$(MAKE) rpm
+else
+	$(MAKE) deb
+endif
+
+# RPM build target
+rpm: $(BUILDINFO_DIR)/$(RPM_NAME)
+
+$(BUILDINFO_DIR)/$(RPM_NAME): scripts/* hooks/* sonic-build-hooks.spec
+	@echo "Building $(RPM_NAME)..."
+	@rm -rf $(BUILDINFO_DIR)/$(SONIC_BUILD_HOOKS) $(RPMBUILD_TOPDIR)
+	@mkdir -p $(BUILDINFO_DIR)/$(RPMBUILD_TOPDIR)/{SOURCES,SPECS,RPMS,SRPMS,BUILDROOT}
+	# Copy sources
+	@cp -r scripts $(SOURCES_DIR)/
+	@cp -r hooks $(SOURCES_DIR)/
+	# Copy spec
+	@cp sonic-build-hooks.spec $(SPEC_DIR)/
+	# Build RPM
+	@rpmbuild --define "_topdir $(CURDIR)/$(RPMBUILD_TOPDIR)" -bb $(SPEC_DIR)/sonic-build-hooks.spec
+	# Copy result
+	@mkdir -p $(BUILDINFO_DIR)
+	@cp $(RPMBUILD_TOPDIR)/RPMS/$(RPM_ARCH)/$(RPM_NAME) $(BUILDINFO_DIR)/
+	@echo "Done: $(BUILDINFO_DIR)/$(RPM_NAME)"
+
+# Debian build target (original)
+deb: $(BUILDINFO_DIR)/$(DEB_PACKAGE)
+
+$(BUILDINFO_DIR)/$(DEB_PACKAGE): $(shell find scripts hooks debian -type f)
+	@rm -rf $(BUILDINFO_DIR)/$(SONIC_BUILD_HOOKS) $(TMP_DIR)
+	@mkdir -p $(DEBIAN_DIR) $(SCRIPTS_PATH) $(HOOKS_PATH) $(SYMBOL_LINK_PATH) $(TRUSTED_GPG_PATH) $(BUILDINFO_DIR)
+	@chmod 0775 $(DEBIAN_DIR)
+	@cp debian/* $(DEBIAN_DIR)/
+	@cp scripts/* $(SCRIPTS_PATH)/
+	@cp hooks/* $(HOOKS_PATH)/
+	@set -e; for url in $$(echo $(TRUSTED_GPG_URLS) | sed 's/[,;]/ /g'); do wget -q "$$url" -P "$(TRUSTED_GPG_PATH)/"; done
+	@for f in $(SYMBOL_LINKS); do ln -s $(SYMBOL_LINKS_SRC_DIR)/$$f $(SYMBOL_LINK_PATH)/$$f; done
+ifeq ($(BUILD_SYSTEM),docker)
+	docker run --user $$(id -u):$$(id -g) --rm -v $$(pwd):/build debian:buster bash -c 'cd /build; dpkg-deb --build $(TMP_DIR)/$(SONIC_BUILD_HOOKS) $(BUILDINFO_DIR)/$(DEB_PACKAGE)'
+else
+	dpkg-deb -Zxz --build $(TMP_DIR)/$(SONIC_BUILD_HOOKS) $(BUILDINFO_DIR)/$(DEB_PACKAGE)
+endif
+
+clean:
+	rm -rf $(BUILDINFO_DIR) $(TMP_DIR) $(RPMBUILD_TOPDIR)
+
+install: all
+ifeq ($(BUILD_SYSTEM),rpm)
+	rpm -ivh $(BUILDINFO_DIR)/$(RPM_NAME)
+else
+	dpkg -i $(BUILDINFO_DIR)/$(DEB_PACKAGE)
+endif

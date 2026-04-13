@@ -1,0 +1,11 @@
+FROM openeuler/openeuler:24.03
+
+# Install build dependencies
+RUN dnf install -y rpm-build make bash wget curl
+
+# Copy the sonic-build-hooks source
+COPY . /root/sonic-build-hooks
+
+WORKDIR /root/sonic-build-hooks
+
+CMD ["/bin/bash"]

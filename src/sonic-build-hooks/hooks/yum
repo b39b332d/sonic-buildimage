@@ -1,0 +1,27 @@
+#!/bin/bash
+# hooks/yum - Intercept yum commands for version control (symlink to dnf on modern systems)
+
+. /usr/local/share/buildinfo/scripts/buildinfo_base.sh
+
+REAL_COMMAND=$(get_command yum)
+if [ -z "$REAL_COMMAND" ]; then
+    REAL_COMMAND=$(get_command dnf)
+fi
+
+if [ -z "$REAL_COMMAND" ]; then
+    echo "The command yum/dnf does not exist." 1>&2
+    exit 1
+fi
+
+if [ -z "$(get_version_cache_option)" ]; then
+    exec $REAL_COMMAND "$@"
+fi
+
+# Check if this is an install command
+DNF_INSTALL=$(check_dnf_install "$@")
+
+if [ "$ENABLE_VERSION_CONTROL_RPM" == "y" ] && [ "$DNF_INSTALL" == "y" ]; then
+    check_dnf_version "$@"
+fi
+
+exec $REAL_COMMAND "$@"

@@ -1,0 +1,28 @@
+#!/bin/bash
+# hooks/dnf - Intercept dnf commands for version control
+# Replaces hooks/apt and hooks/apt-get from the Debian version
+
+. /usr/local/share/buildinfo/scripts/buildinfo_base.sh
+
+REAL_COMMAND=$(get_command dnf)
+if [ -z "$REAL_COMMAND" ]; then
+    REAL_COMMAND=$(get_command yum)
+fi
+
+if [ -z "$REAL_COMMAND" ]; then
+    echo "The command dnf/yum does not exist." 1>&2
+    exit 1
+fi
+
+if [ -z "$(get_version_cache_option)" ]; then
+    exec $REAL_COMMAND "$@"
+fi
+
+# Check if this is an install command - log version if so
+DNF_INSTALL=$(check_dnf_install "$@")
+
+if [ "$ENABLE_VERSION_CONTROL_RPM" == "y" ] && [ "$DNF_INSTALL" == "y" ]; then
+    check_dnf_version "$@"
+fi
+
+exec $REAL_COMMAND "$@"

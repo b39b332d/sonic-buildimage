@@ -1,0 +1,22 @@
+#!/bin/bash
+# hooks/rpm - Intercept rpm commands for version control and locking
+# Replaces hooks/dpkg from the Debian version
+
+. /usr/local/share/buildinfo/scripts/buildinfo_base.sh
+REAL_COMMAND=$(get_command rpm)
+
+if [ -z "$REAL_COMMAND" ]; then
+    echo "The command rpm does not exist." 1>&2
+    exit 1
+fi
+
+RPM_NEED_LOCK=$(check_rpm_need_lock "$@")
+
+if [ "$RPM_NEED_LOCK" == "y" ]; then
+    lock_result=$(acquire_rpm_installation_lock "Locked by command: $REAL_COMMAND $*")
+fi
+
+$REAL_COMMAND "$@"
+command_result=$?
+[ "$lock_result" == "y" ] && release_rpm_installation_lock
+exit $command_result
